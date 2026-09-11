@@ -266,6 +266,36 @@ describe("Sessions capability", () => {
     });
   });
 
+  it("reads the rows underneath an overlay with overlays: false", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      for (let i = 1; i <= 4; i++) {
+        await session.appendMessage(
+          text(`m${i}`, `message ${i}`, i % 2 === 0 ? "assistant" : "user")
+        );
+      }
+      await session.addCompaction("summary", "m1", "m2");
+
+      const stored = await session.getHistory({ overlays: false });
+      expect(stored.map((m) => m.id)).toEqual(["m1", "m2", "m3", "m4"]);
+      expect(stored[0].parts[0].text).toBe("message 1");
+
+      const backward = await collect(
+        session.history({ overlays: false, newestFirst: true })
+      );
+      expect(backward.map((m) => m.id)).toEqual(["m4", "m3", "m2", "m1"]);
+
+      // The default read still collapses the span.
+      const overlaid = await session.getHistory();
+      expect(overlaid.map((m) => m.id)).toEqual([
+        expect.stringMatching(/^compaction_/),
+        "m3",
+        "m4"
+      ]);
+    });
+  });
+
   it("auto-compacts past the threshold using the derived token estimate", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {

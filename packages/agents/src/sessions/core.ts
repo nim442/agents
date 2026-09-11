@@ -649,20 +649,33 @@ export class SessionsCore {
 
   /**
    * Stream the path ending at `leafId` (default: active leaf), root → leaf
-   * (or leaf → root with `newestFirst`), compaction overlays collapsed. Peak
-   * memory is one bounded content window — never the whole transcript.
+   * (or leaf → root with `newestFirst`), compaction overlays collapsed unless
+   * `overlays: false` asks for the stored rows themselves. Peak memory is one
+   * bounded content window — never the whole transcript.
    */
   async *streamHistory(
     sessionId: string,
     options: HistoryReadOptions
   ): AsyncGenerator<SessionMessage, void, undefined> {
+    const overlays = options.overlays !== false;
     if (options.newestFirst === true) {
-      yield* this.#walkFromLeaf(sessionId, options.leafId, options.signal);
+      yield* this.#walkFromLeaf(
+        sessionId,
+        options.leafId,
+        options.signal,
+        overlays
+      );
       return;
     }
     const stats = this.pathRowStats(sessionId, options.leafId);
     if (stats.length === 0) return;
-    yield* this.#streamStats(sessionId, stats, options.signal);
+    yield* this.#streamStats(
+      sessionId,
+      stats,
+      options.signal,
+      false,
+      overlays ? undefined : []
+    );
   }
 
   /**
@@ -671,7 +684,8 @@ export class SessionsCore {
    * yielded, and a consumer that stops early has paid for exactly the rows it
    * saw.
    *
-   * Compaction overlays are honored without planning them up front. An
+   * Compaction overlays are honored without planning them up front (with
+   * `overlays` off no compaction is consulted and the walk stays raw). An
    * overlay that applies to this branch ends at a row the walk reaches
    * before any row it covers, so the raw walk is exact until it lands on
    * some compaction's `toMessageId`. Only then is the remaining prefix read
@@ -682,9 +696,10 @@ export class SessionsCore {
   async *#walkFromLeaf(
     sessionId: string,
     leafId: string | null | undefined,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    overlays = true
   ): AsyncGenerator<SessionMessage, void, undefined> {
-    const compactions = this.getCompactions(sessionId);
+    const compactions = overlays ? this.getCompactions(sessionId) : [];
     const spanEnds = new Set(compactions.map((c) => c.toMessageId));
     let next = this.#resolveLeafId(sessionId, leafId);
     let depth = 0;

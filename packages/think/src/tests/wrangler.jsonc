@@ -172,6 +172,10 @@
         "name": "ThinkLegacySessionApiAgent"
       },
       {
+        "class_name": "ThinkClientProjectionAgent",
+        "name": "ThinkClientProjectionAgent"
+      },
+      {
         "class_name": "BrowserToolsHost",
         "name": "BrowserToolsHost"
       },
@@ -229,6 +233,7 @@
         "ThinkMediaEvictionAutoAgent",
         "ThinkPointerHydrationAgent",
         "ThinkLegacySessionApiAgent",
+        "ThinkClientProjectionAgent",
         "BrowserToolsHost"
       ],
       "tag": "v1"

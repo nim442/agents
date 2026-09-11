@@ -137,6 +137,12 @@ export interface HistoryReadOptions {
    * stops after the message it was looking for reads only the newest rows.
    */
   newestFirst?: boolean;
+  /**
+   * Apply compaction overlays. Default `true`. With `false` the read yields
+   * the stored rows themselves: a compacted span comes back as its original
+   * messages instead of the synthetic `compaction_<id>` summary.
+   */
+  overlays?: boolean;
 }
 
 /** Options accepted by batched history reads. */

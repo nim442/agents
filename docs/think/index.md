@@ -915,6 +915,29 @@ Passes are bounded (`maxRowsPerPass`, 64 by default) and run in the background a
 
 Startup hydration reads a recent window bounded by `hydrationByteBudget` (32 MiB by default). The budget charges each row its stored bytes plus the attachment bytes it re-inflates, so it bounds isolate memory rather than the on-disk footprint.
 
+### Client projection
+
+The model reads the compacted list. `this.messages` is the model's view of the conversation: after a compaction the synthetic `compaction_<id>` summary stands in for the rows it replaced, and a subclass may persist server-only context alongside a turn. Think hands that same list to connected clients on every path — the `cf_agent_chat_messages` broadcast after the transcript changes, the frame a connecting socket receives, the `GET …/get-messages` hydration route, and the snapshot a dropped submit sends back to its connection. Override `projectMessagesForClient` to give people a different list without touching what the model, compaction, or recovery read:
+
+```typescript
+import { Think } from "@cloudflare/think";
+import type { ClientProjectionContext } from "@cloudflare/think";
+import type { UIMessage } from "ai";
+
+export class MyAgent extends Think<Env> {
+  protected override async projectMessagesForClient(
+    messages: UIMessage[],
+    _context: ClientProjectionContext
+  ): Promise<UIMessage[]> {
+    // People read the stored conversation, whole; the model keeps the summary.
+    const stored = await this.session.getHistory({ overlays: false });
+    return stored as UIMessage[];
+  }
+}
+```
+
+The default returns `messages` unchanged. `context.reason` names the path (`"broadcast"`, `"connect"`, `"hydrate"`, or `"rollback"`). The hook may be synchronous or asynchronous; asynchronous projections reach clients in the order Think issued them. The `messages` array is a snapshot, but the message objects in it belong to the live cache, so return new objects rather than mutating them. Keep the projection cheap enough to run on every broadcast, or read a bounded window with `getRecentHistory()`. The same hook is where a subclass strips server-only parts it persisted with a turn before they reach a browser.
+
 ## Package Exports
 
 | Export                                  | Description                                                   |

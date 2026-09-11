@@ -240,6 +240,19 @@ Or store an already-produced summary:
 await session.addCompaction(summary, fromMessageId, toMessageId);
 ```
 
+The original rows stay readable. Every history read accepts `overlays: false`, which yields the stored messages themselves in place of the `compaction_<id>` summary — for example, to show people the whole conversation while the model reads the compacted one:
+
+```ts
+const stored = await session.getHistory({ overlays: false });
+
+for await (const message of session.history({
+  overlays: false,
+  newestFirst: true
+})) {
+  // the rows as written, newest first, no summary in the way
+}
+```
+
 Sessions stamps each message with a token estimate when the row is written. `compactAfter()` gates on that O(1) aggregate and never reads the transcript to decide whether to compact. Auto-compaction failures are non-fatal: they log, emit `session:error`, and leave the transcript alone.
 
 To trim a transcript before handing it to a model, `truncateOlderMessages` is exported from [`agents/chat`](./chat-agents.md), not from `agents/sessions`.

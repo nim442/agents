@@ -2447,6 +2447,22 @@ export function defaultContextOverflowClassifier(
   return CONTEXT_OVERFLOW_PATTERN.test(text) ? "context_overflow" : undefined;
 }
 
+/** Why Think is producing a client-facing message list. */
+export type ClientProjectionReason =
+  /** A `cf_agent_chat_messages` broadcast after the transcript changed. */
+  | "broadcast"
+  /** The idle-connect frame handed to a socket that just connected. */
+  | "connect"
+  /** The `GET …/get-messages` hydration route. */
+  | "hydrate"
+  /** The snapshot a dropped submit sends back to its own connection. */
+  | "rollback";
+
+/** Context passed to {@link Think.projectMessagesForClient}. */
+export interface ClientProjectionContext {
+  readonly reason: ClientProjectionReason;
+}
+
 export interface ChatErrorContext {
   requestId?: string;
   stage: "parse" | "persist" | "turn" | "stream" | "recovery" | "transcript";
@@ -2946,6 +2962,8 @@ export class Think<
 
   /** Cached messages, kept in sync with session storage. */
   private _cachedMessages: UIMessage[] = [];
+  /** Tail of the queued asynchronous client projections (`_sendProjectedMessages`). */
+  private _clientProjectionTail: Promise<void> | null = null;
   private _unsubscribeSessionChanges: (() => void) | undefined;
 
   /**
@@ -5755,6 +5773,35 @@ export class Think<
    */
   onChatError(error: unknown, _ctx?: ChatErrorContext): unknown {
     return error;
+  }
+
+  /**
+   * Project the transcript before it reaches connected clients.
+   *
+   * `this.messages` is the model's view of the conversation: after a
+   * compaction the synthetic `compaction_<id>` summary stands in for the rows
+   * it replaced, and a subclass may persist server-only context alongside a
+   * turn. Every path that hands history to a client routes through this hook
+   * — the `cf_agent_chat_messages` broadcast after the transcript changes,
+   * the frame a connecting socket receives, the `GET …/get-messages`
+   * hydration route, and the snapshot a dropped submit sends back — so
+   * overriding it is enough to give people a different list from the one the
+   * model reads: the stored conversation with overlays unapplied
+   * (`this.session.getHistory({ overlays: false })`), or the same list with
+   * internal parts stripped.
+   *
+   * The default returns `messages` unchanged. Model assembly, compaction, and
+   * recovery never see the projection. The array is a snapshot of the list as
+   * it stood when the send was issued, but the message objects in it are the
+   * live cache's: return new objects rather than mutating them. A synchronous
+   * projection is sent inline; an asynchronous one is queued so frames still
+   * reach clients in the order Think issued them.
+   */
+  protected projectMessagesForClient(
+    messages: UIMessage[],
+    _context: ClientProjectionContext
+  ): UIMessage[] | Promise<UIMessage[]> {
+    return messages;
   }
 
   /**
@@ -11971,7 +12018,9 @@ export class Think<
         url.pathname === "/get-messages" ||
         url.pathname.endsWith("/get-messages")
       ) {
-        return Response.json(this.messages);
+        return Response.json(
+          await this._projectMessagesForClient({ reason: "hydrate" })
+        );
       }
       const messengerResponse =
         await this._messengerRuntime?.handleRequest(request);
@@ -16208,11 +16257,8 @@ export class Think<
   }
 
   private _rollbackDroppedSubmit(connection: Connection): void {
-    connection.send(
-      JSON.stringify({
-        type: MSG_CHAT_MESSAGES,
-        messages: this.messages
-      })
+    this._sendProjectedMessages({ reason: "rollback" }, (messages) =>
+      connection.send(JSON.stringify({ type: MSG_CHAT_MESSAGES, messages }))
     );
   }
 
@@ -16602,7 +16648,10 @@ export class Think<
     Array<Record<string, unknown>>
   > {
     const messages: Array<Record<string, unknown>> = [
-      { type: MSG_CHAT_MESSAGES, messages: this.messages }
+      {
+        type: MSG_CHAT_MESSAGES,
+        messages: await this._projectMessagesForClient({ reason: "connect" })
+      }
     ];
     // Replay an in-progress "recovering…" status so a client that connects
     // mid-recovery reads the turn as working rather than frozen (#1620). This
@@ -16749,10 +16798,59 @@ export class Think<
   }
 
   private _broadcastMessages(exclude?: string[]) {
-    this._broadcast(
-      { type: MSG_CHAT_MESSAGES, messages: this.messages },
-      exclude
+    this._sendProjectedMessages({ reason: "broadcast" }, (messages) =>
+      this._broadcast({ type: MSG_CHAT_MESSAGES, messages }, exclude)
     );
+  }
+
+  /**
+   * The hook applied to a snapshot of the live cache. The cache is mutated in
+   * place as the transcript changes, and an asynchronous projection must see
+   * the list as it stood when the send was issued — what the synchronous
+   * serialization it replaces used to guarantee.
+   */
+  private _projectMessagesForClient(
+    context: ClientProjectionContext
+  ): UIMessage[] | Promise<UIMessage[]> {
+    return this.projectMessagesForClient(this.messages.slice(), context);
+  }
+
+  /**
+   * Hand the projected transcript to `send`. The default projection is
+   * synchronous and is sent inline, exactly as before the hook existed. An
+   * asynchronous projection is queued behind any still-pending one so a later
+   * broadcast can never overtake an earlier snapshot on the wire; a projection
+   * that throws loses that one send (logged) and never fails the turn.
+   */
+  private _sendProjectedMessages(
+    context: ClientProjectionContext,
+    send: (messages: UIMessage[]) => void
+  ): void {
+    let projected: UIMessage[] | Promise<UIMessage[]>;
+    try {
+      projected = this._projectMessagesForClient(context);
+    } catch (error) {
+      console.error("[Think] projectMessagesForClient failed:", error);
+      return;
+    }
+    if (this._clientProjectionTail === null && Array.isArray(projected)) {
+      send(projected);
+      return;
+    }
+    const tail: Promise<void> = (
+      this._clientProjectionTail ?? Promise.resolve()
+    )
+      .then(() => projected)
+      .then(send)
+      .catch((error) => {
+        console.error("[Think] projectMessagesForClient failed:", error);
+      })
+      .finally(() => {
+        if (this._clientProjectionTail === tail) {
+          this._clientProjectionTail = null;
+        }
+      });
+    this._clientProjectionTail = tail;
   }
 }
 

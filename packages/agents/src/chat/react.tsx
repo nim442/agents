@@ -605,6 +605,60 @@ function prependMissingHydratedMessages<ChatMessage extends UIMessage>(
   return [...missingHydratedMessages, ...currentMessages];
 }
 
+/** A tool part's state, or `undefined` for any other part. */
+function toolPartState(part: UIMessage["parts"][number]): string | undefined {
+  return "toolCallId" in part && typeof part.toolCallId === "string"
+    ? (part as { state?: string }).state
+    : undefined;
+}
+
+/**
+ * A server copy of a message, without regressing a tool part the stream
+ * already settled. A `cf_agent_message_updated` frame or a
+ * `cf_agent_chat_messages` snapshot is built from the stored row, which can
+ * trail the live stream by a chunk; replacing the local message wholesale
+ * then flips a tool card from done back to running for one commit. Keep the
+ * local part wherever it is in an output state and the incoming one is not
+ * — the client half of the rule Think applies on the server (#1649).
+ */
+function withSettledToolParts<ChatMessage extends UIMessage>(
+  local: ChatMessage | undefined,
+  incoming: ChatMessage
+): ChatMessage {
+  if (!local || local === incoming) return incoming;
+  let settled: Map<string, ChatMessage["parts"][number]> | null = null;
+  for (const part of local.parts) {
+    if (toolPartState(part)?.startsWith("output-")) {
+      (settled ??= new Map()).set(
+        (part as { toolCallId: string }).toolCallId,
+        part
+      );
+    }
+  }
+  if (!settled) return incoming;
+  let changed = false;
+  const parts = incoming.parts.map((part) => {
+    const state = toolPartState(part);
+    if (state === undefined || state.startsWith("output-")) return part;
+    const kept = settled.get((part as { toolCallId: string }).toolCallId);
+    if (!kept) return part;
+    changed = true;
+    return kept;
+  });
+  return changed ? { ...incoming, parts } : incoming;
+}
+
+/** `withSettledToolParts` over a whole snapshot, matched to local state by id. */
+function snapshotWithSettledToolParts<ChatMessage extends UIMessage>(
+  snapshot: readonly ChatMessage[],
+  currentMessages: readonly ChatMessage[]
+): ChatMessage[] {
+  const byId = new Map(currentMessages.map((m) => [m.id, m]));
+  return snapshot.map((message) =>
+    withSettledToolParts(byId.get(message.id), message)
+  );
+}
+
 /**
  * React hook for building AI chat interfaces using an Agent
  * @param options Chat options including the agent connection
@@ -1311,12 +1365,15 @@ export function useAgentChat<
 
   const preserveProtectedStreamingAssistant = useCallback(
     (
-      messages: readonly ChatMessage[],
+      snapshot: readonly ChatMessage[],
       currentMessages: readonly ChatMessage[]
     ): ChatMessage[] => {
+      // The snapshot's copy of a message can trail the stream by a chunk;
+      // it never takes a settled tool part back to running.
+      const messages = snapshotWithSettledToolParts(snapshot, currentMessages);
       const protection = protectedStreamingAssistantRef.current;
       if (!protection) {
-        return [...messages];
+        return messages;
       }
 
       // If the incoming snapshot already contains the protected assistant AND a
@@ -1338,7 +1395,7 @@ export function useAgentChat<
           .some((message) => message.role === "assistant")
       ) {
         protectedStreamingAssistantRef.current = null;
-        return [...messages];
+        return messages;
       }
 
       // The snapshot is the server's transcript order. Remember where it
@@ -1360,7 +1417,7 @@ export function useAgentChat<
           (message) => message.id === protection.assistantId
         ) ?? messages.find((message) => message.id === protection.assistantId);
       if (!protectedAssistant) {
-        return [...messages];
+        return messages;
       }
 
       return [
@@ -1994,11 +2051,13 @@ export function useAgentChat<
 
             if (idx >= 0) {
               const updated = [...prevMessages];
-              // Preserve the client's message ID but update the content
-              updated[idx] = {
+              // Preserve the client's message ID but update the content —
+              // without taking a tool part the stream already settled back
+              // to running (the frame is built from the stored row).
+              updated[idx] = withSettledToolParts(prevMessages[idx], {
                 ...updatedMessage,
                 id: prevMessages[idx].id
-              };
+              });
               return updated;
             }
             // Message not found — don't append. CF_AGENT_MESSAGE_UPDATED is

@@ -1341,6 +1341,20 @@ export function useAgentChat<
         return [...messages];
       }
 
+      // The snapshot is the server's transcript order. Remember where it
+      // places the protected assistant so `restoreProtectedStreamingAssistant`
+      // returns it there at `done`. The anchor latched from the `start` chunk
+      // is whatever this client held at that moment, which can trail the
+      // server — a tab that reloaded mid-turn, or a snapshot that carried
+      // messages this tab never saw — and no snapshot need follow the
+      // terminal frame to put the reply back in place.
+      if (protectedIndex >= 0) {
+        protectedStreamingAssistantRef.current = {
+          ...protection,
+          anchorMessageId: messages[protectedIndex - 1]?.id ?? null
+        };
+      }
+
       const protectedAssistant =
         currentMessages.find(
           (message) => message.id === protection.assistantId
